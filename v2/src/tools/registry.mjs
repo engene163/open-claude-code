@@ -1,6 +1,7 @@
 /**
  * Tool Registry — validateInput/call interface.
  * Mirrors Claude Code's tool dispatch system.
+ * Registers all 25+ built-in tools.
  */
 
 import { BashTool } from './bash.mjs';
@@ -17,6 +18,17 @@ import { NotebookEditTool } from './notebook-edit.mjs';
 import { MultiEditTool } from './multi-edit.mjs';
 import { LsTool } from './ls.mjs';
 import { ToolSearchTool } from './tool-search.mjs';
+import { AskUserTool } from './ask-user.mjs';
+import { EnterWorktreeTool } from './enter-worktree.mjs';
+import { ExitWorktreeTool } from './exit-worktree.mjs';
+import { SkillTool } from './skill.mjs';
+import { SendMessageTool } from './send-message.mjs';
+import { RemoteTriggerTool } from './remote-trigger.mjs';
+import { CronCreateTool } from './cron-create.mjs';
+import { CronDeleteTool } from './cron-delete.mjs';
+import { CronListTool } from './cron-list.mjs';
+import { LspTool } from './lsp.mjs';
+import { ReadMcpResourceTool } from './read-mcp-resource.mjs';
 
 const BUILTIN_TOOLS = [
     BashTool,
@@ -33,6 +45,17 @@ const BUILTIN_TOOLS = [
     MultiEditTool,
     LsTool,
     ToolSearchTool,
+    AskUserTool,
+    EnterWorktreeTool,
+    ExitWorktreeTool,
+    SkillTool,
+    SendMessageTool,
+    RemoteTriggerTool,
+    CronCreateTool,
+    CronDeleteTool,
+    CronListTool,
+    LspTool,
+    ReadMcpResourceTool,
 ];
 
 export function createToolRegistry() {
@@ -41,7 +64,6 @@ export function createToolRegistry() {
         tools.set(Tool.name, Tool);
     }
 
-    // Wire up ToolSearch with a reference to the registry
     const registry = {
         list() {
             return [...tools.values()].map(t => ({
@@ -71,11 +93,6 @@ export function createToolRegistry() {
             return tools.has(name);
         },
 
-        /**
-         * Register MCP tools so they appear in the registry and are searchable.
-         * @param {Array} mcpTools - tool definitions from MCP listTools
-         * @param {function} callFn - function(name, args) to call the MCP tool
-         */
         registerMcpTools(mcpTools, callFn) {
             ToolSearchTool._mcpTools = mcpTools;
 

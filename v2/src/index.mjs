@@ -7,13 +7,18 @@
  *
  * Architecture mirrors the actual Claude Code internals:
  * - Async generator agent loop (13 event types)
- * - 14 tools with validateInput/call interface
- * - MCP client (stdio transport)
+ * - 25+ tools with validateInput/call interface
+ * - MCP client (stdio/SSE/WS/sHTTP transports)
  * - 6 permission modes + sandbox
  * - Context compaction + auto-compaction
- * - Hooks system (PreToolUse, PostToolUse, Stop)
- * - Settings chain (user/project/local/managed)
+ * - Hooks system (7 events)
+ * - Settings chain (5 layers, 76 properties)
  * - Multi-provider support (Anthropic, OpenAI, Google)
+ * - Custom agents and skills
+ * - Session management and checkpoints
+ * - Prompt caching
+ * - 39 slash commands
+ * - Telemetry stub
  */
 
 import { createAgentLoop } from './core/agent-loop.mjs';
@@ -23,13 +28,38 @@ import { loadSettings } from './config/settings.mjs';
 import { parseArgs } from './config/cli-args.mjs';
 import { HookEngine } from './hooks/engine.mjs';
 import { McpClient } from './mcp/client.mjs';
+import { AgentLoader } from './agents/loader.mjs';
+import { SkillsLoader } from './skills/loader.mjs';
+import { SessionManager } from './core/session.mjs';
+import { CheckpointManager } from './core/checkpoints.mjs';
+import { PromptCache } from './core/cache.mjs';
+import { readEnv } from './config/env.mjs';
+import * as telemetry from './telemetry/index.mjs';
 
 async function main() {
     const args = parseArgs(process.argv.slice(2));
     const settings = await loadSettings();
+    const env = readEnv();
     const tools = createToolRegistry();
     const permissions = createPermissionChecker(settings.permissions);
     const hooks = new HookEngine(settings.hooks);
+
+    // Load custom agents
+    const agentLoader = new AgentLoader();
+    agentLoader.load();
+
+    // Load skills
+    const skillsLoader = new SkillsLoader();
+    skillsLoader.load();
+
+    // Wire skill tool
+    const skillTool = tools.get('Skill');
+    if (skillTool) skillTool._skillsLoader = skillsLoader;
+
+    // Session management
+    const sessionManager = new SessionManager();
+    const checkpointManager = new CheckpointManager();
+    const promptCache = new PromptCache();
 
     // Connect MCP servers if configured
     const mcpClients = [];
@@ -47,6 +77,10 @@ async function main() {
         }
     }
 
+    // Wire MCP resource tool
+    const mcpResourceTool = tools.get('ReadMcpResource');
+    if (mcpResourceTool) mcpResourceTool._mcpClients = mcpClients;
+
     const loop = createAgentLoop({
         model: args.model || settings.model || 'claude-sonnet-4-6',
         tools,
@@ -55,8 +89,24 @@ async function main() {
         hooks,
     });
 
+    // Attach extra state for commands to access
+    loop.state._agentLoader = agentLoader;
+    loop.state._skillsLoader = skillsLoader;
+    loop.state._mcpClients = mcpClients;
+    loop.state._hooks = settings.hooks;
+    loop.state._permissionMode = settings.permissions?.defaultMode || 'default';
+    loop.state._sessionManager = sessionManager;
+    loop.state._checkpointManager = checkpointManager;
+    loop.state._promptCache = promptCache;
+
+    telemetry.track('session.start', { model: loop.state.model });
+
     // Graceful shutdown
     const cleanup = async () => {
+        telemetry.track('session.end', {
+            turns: loop.state.turnCount,
+            tokens: loop.state.tokenUsage,
+        });
         for (const client of mcpClients) {
             await client.disconnect().catch(() => {});
         }
@@ -69,6 +119,7 @@ async function main() {
         for await (const event of loop.run(args.prompt)) {
             handleEvent(event);
         }
+        console.log('');
         await cleanup();
     } else {
         // Interactive REPL
@@ -91,8 +142,7 @@ function handleEvent(event) {
             }
             break;
         case 'assistant':
-            // Text already streamed via stream_event in streaming mode
-            if (!event._streamed) console.log(event.content);
+            if (!event._streamed && event.content) console.log(event.content);
             break;
         case 'tool_progress':
             process.stderr.write(`\x1b[33m[${event.tool}]\x1b[0m `);
@@ -111,7 +161,6 @@ function handleEvent(event) {
             console.error(`\x1b[31mError: ${event.message}\x1b[0m`);
             break;
         case 'stop':
-            console.log('');
             break;
         default:
             break;
