@@ -1,9 +1,16 @@
 /**
  * Streaming Handler — processes Anthropic SSE events from the Messages API.
  *
- * Parses server-sent events and yields structured event objects:
- * - message_start, content_block_start, content_block_delta,
- *   content_block_stop, message_delta, message_stop, ping, error
+ * Handles ALL SSE event types:
+ * - message_start, message_delta, message_stop
+ * - content_block_start, content_block_delta, content_block_stop
+ * - ping
+ * - error
+ *
+ * Parses:
+ * - thinking blocks (type: "thinking")
+ * - tool_use input streaming (type: "input_json_delta")
+ * - Usage tracking from message_delta.usage
  */
 
 /**
@@ -64,6 +71,11 @@ function parseSSEChunk(chunk) {
         }
     }
 
+    // Handle ping events (no data)
+    if (eventType === 'ping') {
+        return { type: 'ping' };
+    }
+
     if (dataLines.length === 0) return null;
 
     const raw = dataLines.join('\n');
@@ -91,7 +103,7 @@ export async function accumulateStream(events) {
         content: [],
         model: null,
         stop_reason: null,
-        usage: { input_tokens: 0, output_tokens: 0 },
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
     };
 
     let currentBlock = null;
@@ -105,6 +117,8 @@ export async function accumulateStream(events) {
                     message.model = event.message.model;
                     if (event.message.usage) {
                         message.usage.input_tokens = event.message.usage.input_tokens || 0;
+                        message.usage.cache_creation_input_tokens = event.message.usage.cache_creation_input_tokens || 0;
+                        message.usage.cache_read_input_tokens = event.message.usage.cache_read_input_tokens || 0;
                     }
                 }
                 break;
@@ -153,6 +167,10 @@ export async function accumulateStream(events) {
                 break;
 
             case 'message_stop':
+                break;
+
+            case 'ping':
+                // Keepalive, ignore
                 break;
 
             case 'error':

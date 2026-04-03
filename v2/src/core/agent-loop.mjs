@@ -1,50 +1,33 @@
 /**
- * Agent Loop — async generator that processes messages through the LLM.
- *
- * Based on decompiled Claude Code's `s$` function:
- * - Yields 13 event types
- * - Recursively calls itself after tool execution
- * - Handles streaming, tool calls, and stop conditions
- * - Thinking block support
- * - Auto-compaction via ContextManager
- * - Stop hooks integration
- * - Multi-provider adapter (Anthropic, OpenAI, Google)
+ * Agent Loop — async generator yielding 13 event types.
+ * Handles streaming, tool calls, thinking, auto-compaction, hooks, multi-provider.
  */
-
 import { streamResponse, accumulateStream } from './streaming.mjs';
 import { ContextManager } from './context-manager.mjs';
+import { buildSystemPrompt } from './system-prompt.mjs';
 import fs from 'fs';
 import path from 'path';
-
-/**
- * Create an agent loop instance.
- * @param {object} options
- * @param {string} options.model - model identifier
- * @param {object} options.tools - tool registry
- * @param {object} options.permissions - permission checker
- * @param {object} options.settings - loaded settings
- * @param {object} [options.hooks] - hook engine instance
- * @returns {{ run: AsyncGeneratorFunction, state: object }}
- */
 export function createAgentLoop({ model, tools, permissions, settings, hooks }) {
     const contextManager = new ContextManager(settings.maxContextTokens || 180000);
 
+    // Build system prompt using the new builder
+    const promptResult = buildSystemPrompt({
+        cwd: process.cwd(),
+        tools: tools.list?.() || [],
+        override: settings.systemPromptOverride,
+        addDirs: settings.addDirs,
+    });
+
     const state = {
         messages: [],
-        systemPrompt: loadSystemPrompt(),
+        systemPrompt: promptResult.full,
         turnCount: 0,
         tokenUsage: { input: 0, output: 0 },
         model,
         tools,
+        _contextManager: contextManager,
     };
 
-    /**
-     * Run the agent loop. Yields events as they occur.
-     *
-     * @param {string|null} userMessage - user input (null for continuation turns)
-     * @param {object} [options] - { continuation: boolean }
-     * @yields {object} event objects with `type` field
-     */
     async function* run(userMessage, options = {}) {
         // Add user message (skip for continuation turns)
         if (userMessage && !options.continuation) {
@@ -53,6 +36,13 @@ export function createAgentLoop({ model, tools, permissions, settings, hooks }) 
                 content: userMessage,
             });
             state.turnCount++;
+        }
+
+        // Check max turns
+        if (settings.maxTurns && state.turnCount > settings.maxTurns) {
+            yield { type: 'error', message: `Max turns (${settings.maxTurns}) reached.` };
+            yield { type: 'stop', reason: 'max_turns' };
+            return;
         }
 
         // Auto-compact if needed
@@ -88,6 +78,8 @@ export function createAgentLoop({ model, tools, permissions, settings, hooks }) 
                             currentThinking += event.delta.thinking;
                             yield { type: 'thinking', text: event.delta.thinking };
                         }
+                    } else if (event.type === 'ping') {
+                        // Keepalive, ignore
                     }
                 }
 
@@ -212,59 +204,24 @@ export function createAgentLoop({ model, tools, permissions, settings, hooks }) 
     return { run, state };
 }
 
-/**
- * Detect which provider to use based on model name.
- */
 function detectProvider(model) {
     if (model.startsWith('gpt-') || model.startsWith('o1') || model.startsWith('o3')) return 'openai';
     if (model.startsWith('gemini')) return 'google';
     return 'anthropic';
 }
 
-/**
- * Load system prompt from CLAUDE.md files in the working directory.
- */
-function loadSystemPrompt() {
-    const candidates = [
-        path.join(process.cwd(), 'CLAUDE.md'),
-        path.join(process.cwd(), '.claude', 'CLAUDE.md'),
-    ];
-
-    const parts = ['You are an AI coding assistant.'];
-    for (const file of candidates) {
-        try {
-            const content = fs.readFileSync(file, 'utf-8');
-            parts.push(content);
-        } catch {
-            // File not found, skip
-        }
-    }
-    return parts.join('\n\n');
-}
-
-// ---------- API Callers ----------
-
-/**
- * Non-streaming API call.
- */
 async function callApi(provider, model, state, toolDefs, settings) {
     const callers = { anthropic: callAnthropic, openai: callOpenAI, google: callGoogle };
     const caller = callers[provider] || callers.anthropic;
     return caller(model, state, toolDefs, settings, false);
 }
 
-/**
- * Streaming API call. Returns { events, accumulated }.
- */
 async function callApiStreaming(provider, model, state, toolDefs, settings) {
     const callers = { anthropic: callAnthropic, openai: callOpenAI, google: callGoogle };
     const caller = callers[provider] || callers.anthropic;
     return caller(model, state, toolDefs, settings, true);
 }
 
-/**
- * Anthropic Messages API.
- */
 async function callAnthropic(model, state, toolDefs, settings, stream) {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
@@ -299,8 +256,6 @@ async function callAnthropic(model, state, toolDefs, settings, stream) {
     }
 
     if (stream) {
-        const events = streamResponse(res);
-        // Create a tee: one for yielding events, one for accumulating
         const collected = [];
         const eventGenerator = async function* () {
             for await (const event of streamResponse(res)) {
@@ -308,7 +263,6 @@ async function callAnthropic(model, state, toolDefs, settings, stream) {
                 yield event;
             }
         };
-        // We need to accumulate after events are consumed
         return {
             events: eventGenerator(),
             get accumulated() {
@@ -320,15 +274,10 @@ async function callAnthropic(model, state, toolDefs, settings, stream) {
     return res.json();
 }
 
-/**
- * OpenAI-compatible API (Chat Completions).
- * Converts between Anthropic and OpenAI message formats.
- */
 async function callOpenAI(model, state, toolDefs, settings, stream) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) throw new Error('OPENAI_API_KEY not set');
 
-    // Convert messages to OpenAI format
     const messages = [];
     if (state.systemPrompt) {
         messages.push({ role: 'system', content: state.systemPrompt });
@@ -337,7 +286,6 @@ async function callOpenAI(model, state, toolDefs, settings, stream) {
         if (typeof msg.content === 'string') {
             messages.push({ role: msg.role, content: msg.content });
         } else if (Array.isArray(msg.content)) {
-            // Convert tool results back to OpenAI format
             for (const block of msg.content) {
                 if (block.type === 'tool_result') {
                     messages.push({
@@ -350,7 +298,6 @@ async function callOpenAI(model, state, toolDefs, settings, stream) {
         }
     }
 
-    // Convert tools to OpenAI format
     const tools = toolDefs.map(t => ({
         type: 'function',
         function: { name: t.name, description: t.description, parameters: t.input_schema },
@@ -378,18 +325,13 @@ async function callOpenAI(model, state, toolDefs, settings, stream) {
     }
 
     const data = await res.json();
-    // Convert response to Anthropic format
     return convertOpenAIResponse(data);
 }
 
-/**
- * Google Gemini API.
- */
 async function callGoogle(model, state, toolDefs, settings, stream) {
     const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error('GOOGLE_API_KEY or GEMINI_API_KEY not set');
 
-    // Convert to Gemini format
     const contents = [];
     for (const msg of state.messages) {
         const role = msg.role === 'assistant' ? 'model' : 'user';
@@ -422,8 +364,6 @@ async function callGoogle(model, state, toolDefs, settings, stream) {
     const data = await res.json();
     return convertGoogleResponse(data);
 }
-
-// ---------- Response Converters ----------
 
 function convertOpenAIResponse(data) {
     const choice = data.choices?.[0];
@@ -474,9 +414,6 @@ function convertGoogleResponse(data) {
     };
 }
 
-/**
- * Build an accumulated message from collected SSE events.
- */
 function accumulateFromCollected(events) {
     const message = {
         content: [],
@@ -515,6 +452,8 @@ function accumulateFromCollected(events) {
             case 'message_delta':
                 if (event.delta?.stop_reason) message.stop_reason = event.delta.stop_reason;
                 if (event.usage) message.usage.output_tokens = event.usage.output_tokens || 0;
+                break;
+            case 'ping':
                 break;
         }
     }

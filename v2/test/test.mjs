@@ -918,6 +918,340 @@ const runner = new SkillRunner(skillsLoader, loop);
 const available = runner.listAvailable();
 assert(Array.isArray(available), 'Skill runner lists available');
 
+// ---------- Phase 1: Enhanced Tool Tests ----------
+
+section('Phase 1: Bash Tool (timeout, background, ANSI strip)');
+
+// Bash: basic execution
+const bashResult = await registry.call('Bash', { command: 'echo hello' });
+assertEqual(bashResult, 'hello', 'Bash basic echo');
+
+// Bash: description parameter accepted
+const bashDesc = await registry.call('Bash', { command: 'echo 1', description: 'test' });
+assertIncludes(bashDesc, '1', 'Bash with description');
+
+// Bash: timeout (short timeout on sleep)
+const bashTimeout = await registry.call('Bash', { command: 'sleep 10', timeout: 500 });
+assertIncludes(bashTimeout, 'timed out', 'Bash timeout fires');
+
+// Bash: ANSI stripping
+const bashAnsi = await registry.call('Bash', { command: 'echo -e "\\x1b[31mred\\x1b[0m"' });
+assert(!bashAnsi.includes('\x1b['), 'Bash strips ANSI codes');
+
+// Bash: run_in_background
+const bashBg = await registry.call('Bash', { command: 'echo bg', run_in_background: true });
+assertIncludes(bashBg, 'Background job', 'Bash background returns job id');
+
+// Bash: exit code reported
+const bashExit = await registry.call('Bash', { command: 'exit 42' });
+assertIncludes(bashExit, '42', 'Bash reports exit code');
+
+section('Phase 1: Read Tool (binary, limit, line numbers)');
+
+// Read: line number format (cat -n)
+const readLines = await registry.call('Read', { file_path: import.meta.url.replace('file://', '') });
+assertIncludes(readLines, '1\t', 'Read has line number prefix');
+
+// Read: file not found
+const readNotFound = await registry.call('Read', { file_path: '/tmp/nonexistent-file-xyz.txt' });
+assertIncludes(readNotFound, 'File not found', 'Read handles missing file');
+
+// Read: binary detection
+const binFile = path.join(os.tmpdir(), 'occ-test-bin-' + Date.now());
+fs.writeFileSync(binFile, Buffer.from([0x89, 0x50, 0x4E, 0x47, 0, 0, 0, 0]));
+const readBin = await registry.call('Read', { file_path: binFile });
+assertIncludes(readBin, 'binary', 'Read detects binary');
+fs.unlinkSync(binFile);
+
+// Read: default 2000 line limit
+const bigFile = path.join(os.tmpdir(), 'occ-test-big-' + Date.now());
+const bigContent = Array.from({length: 3000}, (_, i) => `line ${i}`).join('\n');
+fs.writeFileSync(bigFile, bigContent);
+const readBig = await registry.call('Read', { file_path: bigFile });
+assertIncludes(readBig, 'lines total', 'Read enforces 2000 line limit');
+fs.unlinkSync(bigFile);
+
+// Read: empty file
+const emptyFile = path.join(os.tmpdir(), 'occ-test-empty-' + Date.now());
+fs.writeFileSync(emptyFile, '');
+const readEmpty = await registry.call('Read', { file_path: emptyFile });
+assertIncludes(readEmpty, 'empty', 'Read handles empty file');
+fs.unlinkSync(emptyFile);
+
+// Read: offset and limit
+const readOffset = await registry.call('Read', {
+    file_path: import.meta.url.replace('file://', ''),
+    offset: 5,
+    limit: 3,
+});
+assertIncludes(readOffset, '6\t', 'Read offset starts at correct line');
+
+// Read: directory error
+const readDir = await registry.call('Read', { file_path: '/tmp' });
+assertIncludes(readDir, 'directory', 'Read rejects directory');
+
+section('Phase 1: Edit Tool (replace_all, uniqueness, read-first)');
+
+// Edit: requires read first
+import { hasBeenRead, markRead } from '../src/tools/read.mjs';
+const editTestFile = path.join(os.tmpdir(), 'occ-edit-test-' + Date.now() + '.txt');
+fs.writeFileSync(editTestFile, 'aaa bbb aaa ccc');
+
+const editNoRead = await registry.call('Edit', {
+    file_path: editTestFile,
+    old_string: 'aaa',
+    new_string: 'xxx',
+});
+assertIncludes(editNoRead, 'must Read', 'Edit requires read first');
+
+// Mark as read, then edit with non-unique string
+markRead(editTestFile);
+const editNonUnique = await registry.call('Edit', {
+    file_path: editTestFile,
+    old_string: 'aaa',
+    new_string: 'xxx',
+});
+assertIncludes(editNonUnique, 'not unique', 'Edit rejects non-unique old_string');
+
+// Edit: replace_all
+const editAll = await registry.call('Edit', {
+    file_path: editTestFile,
+    old_string: 'aaa',
+    new_string: 'xxx',
+    replace_all: true,
+});
+assertIncludes(editAll, 'updated', 'Edit replace_all succeeds');
+assertEqual(fs.readFileSync(editTestFile, 'utf-8'), 'xxx bbb xxx ccc', 'Edit replaced all');
+fs.unlinkSync(editTestFile);
+
+section('Phase 1: Write Tool (read-first for overwrite)');
+
+// Write: new file succeeds without read
+const writeNewFile = path.join(os.tmpdir(), 'occ-write-new-' + Date.now() + '.txt');
+const writeNewResult = await registry.call('Write', { file_path: writeNewFile, content: 'hello' });
+assertIncludes(writeNewResult, 'written', 'Write new file succeeds');
+
+// Write: overwrite requires read first — but markRead was called by write itself
+const writeOverResult = await registry.call('Write', { file_path: writeNewFile, content: 'updated' });
+assertIncludes(writeOverResult, 'written', 'Write overwrite succeeds after auto-mark');
+fs.unlinkSync(writeNewFile);
+
+section('Phase 1: Glob Tool (proper matching)');
+
+// Glob: basic pattern
+const globDir = path.join(os.tmpdir(), 'occ-glob-' + Date.now());
+fs.mkdirSync(path.join(globDir, 'sub'), { recursive: true });
+fs.writeFileSync(path.join(globDir, 'a.js'), '');
+fs.writeFileSync(path.join(globDir, 'b.ts'), '');
+fs.writeFileSync(path.join(globDir, 'sub', 'c.js'), '');
+
+const globResult = await registry.call('Glob', { pattern: '*.js', path: globDir });
+assertIncludes(globResult, 'a.js', 'Glob finds .js files');
+
+const globDeep = await registry.call('Glob', { pattern: '**/*.js', path: globDir });
+assertIncludes(globDeep, 'c.js', 'Glob ** finds deep files');
+
+// Cleanup
+fs.rmSync(globDir, { recursive: true, force: true });
+
+section('Phase 1: Grep Tool (modes, flags)');
+
+// Grep: basic search
+const grepDir = path.join(os.tmpdir(), 'occ-grep-' + Date.now());
+fs.mkdirSync(grepDir, { recursive: true });
+fs.writeFileSync(path.join(grepDir, 'test.txt'), 'Hello World\nfoo bar\nHello Again');
+
+const grepFiles = await registry.call('Grep', {
+    pattern: 'Hello',
+    path: grepDir,
+    output_mode: 'files_with_matches',
+});
+assertIncludes(grepFiles, 'test.txt', 'Grep finds file');
+
+const grepContent = await registry.call('Grep', {
+    pattern: 'Hello',
+    path: grepDir,
+    output_mode: 'content',
+});
+assertIncludes(grepContent, 'Hello', 'Grep content mode works');
+
+const grepCount = await registry.call('Grep', {
+    pattern: 'Hello',
+    path: grepDir,
+    output_mode: 'count',
+});
+assertIncludes(grepCount, '2', 'Grep count shows 2 matches');
+
+// Grep: case insensitive
+const grepInsensitive = await registry.call('Grep', {
+    pattern: 'hello',
+    path: grepDir,
+    '-i': true,
+    output_mode: 'content',
+});
+assertIncludes(grepInsensitive, 'Hello', 'Grep case insensitive');
+
+fs.rmSync(grepDir, { recursive: true, force: true });
+
+section('Phase 1: Agent Tool (model, background, type)');
+
+const agentTool = registry.get('Agent');
+assert(agentTool.inputSchema.properties.subagent_type !== undefined, 'Agent has subagent_type');
+assert(agentTool.inputSchema.properties.model !== undefined, 'Agent has model override');
+assert(agentTool.inputSchema.properties.run_in_background !== undefined, 'Agent has run_in_background');
+assert(agentTool.inputSchema.properties.isolation !== undefined, 'Agent has isolation option');
+
+// ---------- Phase 2: Streaming & Context Tests ----------
+
+section('Phase 2: Streaming (ping, cache usage)');
+
+async function* mockPingEvents() {
+    yield { type: 'message_start', message: { id: 'msg_p', model: 'test', usage: { input_tokens: 10, cache_creation_input_tokens: 50, cache_read_input_tokens: 30 } } };
+    yield { type: 'ping' };
+    yield { type: 'content_block_start', index: 0, content_block: { type: 'text' } };
+    yield { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hi' } };
+    yield { type: 'content_block_stop', index: 0 };
+    yield { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } };
+    yield { type: 'message_stop' };
+}
+
+const pingAccumulated = await accumulateStream(mockPingEvents());
+assertEqual(pingAccumulated.content[0].text, 'Hi', 'Ping does not break accumulation');
+assertEqual(pingAccumulated.usage.cache_creation_input_tokens, 50, 'Cache creation tokens tracked');
+assertEqual(pingAccumulated.usage.cache_read_input_tokens, 30, 'Cache read tokens tracked');
+
+section('Phase 2: Context Manager (micro-compaction, stats)');
+
+const ctx3 = new ContextManager(1000);
+const stats3 = ctx3.getStats();
+assertEqual(stats3.compactionCount, 0, 'Stats start at 0');
+
+// Micro-compaction: tool results get truncated
+const microMessages = [];
+for (let i = 0; i < 20; i++) {
+    microMessages.push({ role: 'user', content: `msg ${i}` });
+    microMessages.push({ role: 'user', content: [
+        { type: 'tool_result', tool_use_id: `t_${i}`, content: 'x'.repeat(500) },
+    ]});
+}
+const microCompacted = ctx3.microCompact(microMessages, 3);
+// Old tool results should be truncated
+let foundTruncated = false;
+for (const msg of microCompacted.slice(0, 10)) {
+    if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+            if (block.content?.includes('[truncated]')) foundTruncated = true;
+        }
+    }
+}
+assert(foundTruncated, 'Micro-compaction truncates old tool results');
+
+section('Phase 2: System Prompt');
+
+import { buildSystemPrompt, loadClaudeMdFiles, toCacheBlocks } from '../src/core/system-prompt.mjs';
+
+const prompt = buildSystemPrompt({ cwd: '/tmp' });
+assertIncludes(prompt.full, 'AI coding assistant', 'System prompt has base text');
+assertType(prompt.staticPrefix, 'string', 'Has static prefix');
+assertType(prompt.dynamicSuffix, 'string', 'Has dynamic suffix');
+
+// With tools
+const promptWithTools = buildSystemPrompt({ cwd: '/tmp', tools: [{ name: 'Bash', description: 'Run commands' }] });
+assertIncludes(promptWithTools.dynamicSuffix, 'Bash', 'Dynamic suffix includes tool names');
+
+// Override
+const promptOverride = buildSystemPrompt({ override: 'Custom prompt' });
+assertEqual(promptOverride.full, 'Custom prompt', 'Override replaces prompt');
+
+// Cache blocks
+const blocks = toCacheBlocks('static', 'dynamic');
+assertEqual(blocks.length, 2, 'Two cache blocks');
+assertEqual(blocks[0].cache_control.type, 'ephemeral', 'Static block cached');
+assert(blocks[1].cache_control === undefined, 'Dynamic block not cached');
+
+// ---------- Phase 3: CLI, UI, Commands Tests ----------
+
+section('Phase 3: CLI Args (full flags)');
+
+const args5 = parseArgs(['--permission-mode', 'plan', '-p', 'test', '--verbose']);
+assertEqual(args5.permissionMode, 'plan', 'Parse --permission-mode');
+assertEqual(args5.verbose, true, 'Parse --verbose');
+assertEqual(args5.prompt, 'test', 'Parse -p with other flags');
+
+const args6 = parseArgs(['--output-format', 'json', '--max-turns', '10', '--debug']);
+assertEqual(args6.outputFormat, 'json', 'Parse --output-format');
+assertEqual(args6.maxTurns, 10, 'Parse --max-turns');
+assertEqual(args6.debug, true, 'Parse --debug');
+
+const args7 = parseArgs(['--allowedTools', 'Bash,Read', '--disallowedTools', 'Write']);
+assert(Array.isArray(args7.allowedTools), 'allowedTools is array');
+assertEqual(args7.allowedTools.length, 2, 'Two allowed tools');
+assertEqual(args7.disallowedTools[0], 'Write', 'Disallowed tool parsed');
+
+const args8 = parseArgs(['--system-prompt', 'You are helpful', '--add-dir', '/tmp']);
+assertEqual(args8.systemPrompt, 'You are helpful', 'Parse --system-prompt');
+assertEqual(args8.addDirs[0], '/tmp', 'Parse --add-dir');
+
+const args9 = parseArgs(['--version']);
+assertEqual(args9.showVersion, true, 'Parse --version');
+
+const args10 = parseArgs(['--help']);
+assertEqual(args10.showHelp, true, 'Parse --help');
+
+import { getUsageText } from '../src/config/cli-args.mjs';
+const usage = getUsageText();
+assertIncludes(usage, '--model', 'Usage text has --model');
+assertIncludes(usage, '--permission-mode', 'Usage text has --permission-mode');
+
+section('Phase 3: UI (markdown, thinking, cost)');
+
+import { renderMarkdown, renderThinking } from '../src/ui/ink-app.mjs';
+
+const mdResult2 = renderMarkdown('**bold** and *italic* and `code`');
+assertType(mdResult2, 'string', 'renderMarkdown returns string');
+
+const thinkingOut = renderThinking('thinking...');
+assertType(thinkingOut, 'string', 'renderThinking returns string');
+
+// Status bar with cost
+const statusWithCost = renderStatusBar({
+    model: 'claude-sonnet-4-6',
+    tokenUsage: { input: 1000, output: 500 },
+    turnCount: 3,
+});
+assertType(statusWithCost, 'string', 'Status bar with cost');
+
+section('Phase 3: Commands (/compact with tokens, /cost with model, /tokens with context)');
+
+const phase3State = {
+    messages: [
+        { role: 'user', content: 'hello' },
+        { role: 'assistant', content: 'world' },
+    ],
+    turnCount: 1,
+    tokenUsage: { input: 100, output: 50 },
+    model: 'claude-haiku-4-5',
+    _contextManager: new ContextManager(10000),
+    tools: { list: () => [] },
+};
+
+// /tokens now shows context
+const tokResult = COMMANDS['/tokens'].handler('', phase3State);
+assertIncludes(tokResult, 'Context', '/tokens shows context');
+
+// /cost uses model-specific pricing
+const costResult2 = COMMANDS['/cost'].handler('', phase3State);
+assertIncludes(costResult2, 'haiku', '/cost shows model name');
+
+// /memory shows tokens
+const memResult2 = COMMANDS['/memory'].handler('', phase3State);
+assertIncludes(memResult2, 'tokens', '/memory shows token estimate');
+
+// /doctor shows API and MCP
+const docResult2 = COMMANDS['/doctor'].handler('', phase3State);
+assertIncludes(docResult2, 'API', '/doctor shows API status');
+assertIncludes(docResult2, 'MCP', '/doctor shows MCP status');
+
 // ---------- Summary ----------
 
 console.log('\n========================================');

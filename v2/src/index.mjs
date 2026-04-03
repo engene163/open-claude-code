@@ -25,7 +25,7 @@ import { createAgentLoop } from './core/agent-loop.mjs';
 import { createToolRegistry } from './tools/registry.mjs';
 import { createPermissionChecker } from './permissions/checker.mjs';
 import { loadSettings } from './config/settings.mjs';
-import { parseArgs } from './config/cli-args.mjs';
+import { parseArgs, getUsageText } from './config/cli-args.mjs';
 import { HookEngine } from './hooks/engine.mjs';
 import { McpClient } from './mcp/client.mjs';
 import { AgentLoader } from './agents/loader.mjs';
@@ -38,11 +38,37 @@ import * as telemetry from './telemetry/index.mjs';
 
 async function main() {
     const args = parseArgs(process.argv.slice(2));
+
+    // Handle --version
+    if (args.showVersion) {
+        console.log('open-claude-code v2.0.0-alpha.1');
+        process.exit(0);
+    }
+
+    // Handle --help
+    if (args.showHelp) {
+        console.log(getUsageText());
+        process.exit(0);
+    }
+
     const settings = await loadSettings();
     const env = readEnv();
+
+    // Apply CLI overrides to settings
+    if (args.permissionMode) settings.permissions = { ...settings.permissions, defaultMode: args.permissionMode };
+    if (args.systemPrompt) settings.systemPromptOverride = args.systemPrompt;
+    if (args.addDirs?.length) settings.addDirs = args.addDirs;
+    if (args.maxTurns) settings.maxTurns = args.maxTurns;
+    if (args.verbose) settings.verbose = true;
+    if (args.debug) settings.debug = true;
+
     const tools = createToolRegistry();
     const permissions = createPermissionChecker(settings.permissions);
     const hooks = new HookEngine(settings.hooks);
+
+    // Apply tool allow/deny lists
+    if (args.allowedTools) settings.allowedTools = args.allowedTools;
+    if (args.disallowedTools) settings.disallowedTools = args.disallowedTools;
 
     // Load custom agents
     const agentLoader = new AgentLoader();
@@ -116,10 +142,34 @@ async function main() {
 
     if (args.prompt) {
         // Non-interactive: run prompt and exit
+        const outputFormat = args.outputFormat || 'text';
+        const results = [];
+
         for await (const event of loop.run(args.prompt)) {
-            handleEvent(event);
+            if (outputFormat === 'json') {
+                results.push(event);
+            } else if (outputFormat === 'stream-json') {
+                console.log(JSON.stringify(event));
+            } else {
+                handleEvent(event, settings);
+            }
         }
-        console.log('');
+
+        if (outputFormat === 'json') {
+            // Extract final text
+            const texts = results
+                .filter(e => e.type === 'assistant')
+                .map(e => e.content)
+                .filter(Boolean);
+            console.log(JSON.stringify({
+                result: texts.join('\n'),
+                usage: loop.state.tokenUsage,
+                model: loop.state.model,
+            }));
+        } else {
+            console.log('');
+        }
+
         await cleanup();
     } else {
         // Interactive REPL
@@ -129,7 +179,7 @@ async function main() {
     }
 }
 
-function handleEvent(event) {
+function handleEvent(event, settings = {}) {
     switch (event.type) {
         case 'stream_request_start':
             break;
@@ -137,7 +187,7 @@ function handleEvent(event) {
             process.stdout.write(event.text || '');
             break;
         case 'thinking':
-            if (process.env.SHOW_THINKING) {
+            if (process.env.SHOW_THINKING || settings.verbose) {
                 process.stdout.write(`\x1b[2m${event.text}\x1b[0m`);
             }
             break;
@@ -145,7 +195,7 @@ function handleEvent(event) {
             if (!event._streamed && event.content) console.log(event.content);
             break;
         case 'tool_progress':
-            process.stderr.write(`\x1b[33m[${event.tool}]\x1b[0m `);
+            process.stderr.write(`\x1b[33m[${event.tool}]\x1b[0m running...\n`);
             break;
         case 'result':
             break;

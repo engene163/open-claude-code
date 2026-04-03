@@ -1,12 +1,13 @@
 /**
  * Ink-like Terminal UI — rich terminal output without heavy dependencies.
  *
- * Provides:
- * - Syntax highlighting for code blocks
+ * Features:
  * - Spinner during API calls
- * - Color output using ANSI codes
- * - Tool execution progress
- * - Token count display in status bar
+ * - Color tool names in yellow, errors in red, thinking in dim
+ * - Code blocks with ``` detection and basic syntax coloring
+ * - Markdown bold, italic, inline code rendering
+ * - Status line showing model, tokens used, cost estimate
+ * - Progress for tool execution (show tool name + "running...")
  */
 
 // ANSI color codes
@@ -96,7 +97,6 @@ export function highlightCode(text) {
 function highlightLine(line, lang) {
     if (noColor) return line;
 
-    // Basic syntax highlighting
     let result = line;
 
     // Strings
@@ -116,26 +116,55 @@ function highlightLine(line, lang) {
 }
 
 /**
+ * Render markdown formatting: bold, italic, inline code.
+ * @param {string} text
+ * @returns {string}
+ */
+export function renderMarkdown(text) {
+    if (noColor) return text;
+    let result = text;
+
+    // Bold: **text**
+    result = result.replace(/\*\*(.+?)\*\*/g, `${COLORS.bold}$1${COLORS.reset}`);
+
+    // Italic: *text*
+    result = result.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, `${COLORS.italic}$1${COLORS.reset}`);
+
+    // Inline code: `text`
+    result = result.replace(/`([^`]+)`/g, `${COLORS.cyan}$1${COLORS.reset}`);
+
+    return result;
+}
+
+/**
  * Render a tool progress indicator.
  * @param {string} toolName
  * @param {string} status
  */
 export function renderToolProgress(toolName, status) {
     const icon = status === 'running' ? c('yellow', '>>') : c('green', '>>');
-    return `${icon} ${c('bold', toolName)} ${c('dim', status)}`;
+    return `${icon} ${c('yellow', toolName)} ${c('dim', status)}`;
 }
 
 /**
- * Render a status bar with token counts.
+ * Render a status bar with token counts and cost estimate.
  * @param {object} state
  */
 export function renderStatusBar(state) {
     if (noColor || !process.stderr.isTTY) return '';
     const cols = process.stdout.columns || 80;
     const model = state.model || 'default';
-    const tokens = `in:${state.tokenUsage.input} out:${state.tokenUsage.output}`;
-    const turns = `turn:${state.turnCount}`;
-    const right = `${model} | ${tokens} | ${turns}`;
+    const inp = state.tokenUsage?.input || 0;
+    const out = state.tokenUsage?.output || 0;
+    const tokens = `in:${inp} out:${out}`;
+    const turns = `turn:${state.turnCount || 0}`;
+
+    // Cost estimate (Sonnet pricing by default)
+    const costIn = (inp / 1_000_000) * 3;
+    const costOut = (out / 1_000_000) * 15;
+    const cost = `$${(costIn + costOut).toFixed(4)}`;
+
+    const right = `${model} | ${tokens} | ${cost} | ${turns}`;
     const padding = Math.max(0, cols - right.length - 1);
     return c('dim', `${' '.repeat(padding)}${right}`);
 }
@@ -165,6 +194,14 @@ export function renderSuccess(message) {
 }
 
 /**
+ * Render thinking output (dim).
+ * @param {string} text
+ */
+export function renderThinking(text) {
+    return c('dim', text);
+}
+
+/**
  * Format a tool result for display.
  * @param {string} toolName
  * @param {string} result
@@ -190,5 +227,5 @@ export function clearScreen() {
  */
 export function hr() {
     const cols = process.stdout.columns || 80;
-    return c('dim', '─'.repeat(cols));
+    return c('dim', '-'.repeat(cols));
 }

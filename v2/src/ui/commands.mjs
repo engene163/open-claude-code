@@ -49,15 +49,24 @@ export const COMMANDS = {
         description: 'Manually compact conversation context',
         handler(args, state) {
             const before = state.messages.length;
+            const beforeTokens = state._contextManager
+                ? state._contextManager.getTokenCount(state.messages)
+                : 0;
+
             if (state._contextManager) {
                 state.messages = state._contextManager.compact(state.messages);
             } else {
-                // Simple compaction
                 if (state.messages.length > 10) {
                     state.messages = state.messages.slice(-8);
                 }
             }
-            return `Compacted: ${before} -> ${state.messages.length} messages`;
+
+            const afterTokens = state._contextManager
+                ? state._contextManager.getTokenCount(state.messages)
+                : 0;
+
+            return `Compacted: ${before} -> ${state.messages.length} messages` +
+                (beforeTokens ? ` (~${beforeTokens} -> ~${afterTokens} tokens)` : '');
         },
     },
 
@@ -65,12 +74,19 @@ export const COMMANDS = {
         description: 'Show token usage and estimated cost',
         handler(args, state) {
             const { input, output } = state.tokenUsage;
-            const costIn = (input / 1_000_000) * 3; // $3/M input tokens
-            const costOut = (output / 1_000_000) * 15; // $15/M output tokens
+            // Use model-appropriate pricing
+            const model = state.model || '';
+            let priceIn = 3, priceOut = 15; // Sonnet default
+            if (model.includes('haiku')) { priceIn = 0.25; priceOut = 1.25; }
+            if (model.includes('opus')) { priceIn = 15; priceOut = 75; }
+
+            const costIn = (input / 1_000_000) * priceIn;
+            const costOut = (output / 1_000_000) * priceOut;
             const total = costIn + costOut;
             return [
                 `Token usage: input=${input}, output=${output}`,
                 `Estimated cost: $${total.toFixed(4)} (in: $${costIn.toFixed(4)}, out: $${costOut.toFixed(4)})`,
+                `Model: ${state.model || 'default'}`,
                 `Turns: ${state.turnCount}`,
             ].join('\n');
         },
@@ -87,6 +103,18 @@ export const COMMANDS = {
             checks.push(`Messages: ${state.messages.length}`);
             checks.push(`CWD: ${process.cwd()}`);
             checks.push(`Platform: ${process.platform}`);
+
+            // Check API connectivity
+            let apiStatus = 'unchecked';
+            if (process.env.ANTHROPIC_API_KEY) {
+                apiStatus = 'key present';
+            }
+            checks.push(`API: ${apiStatus}`);
+
+            // Check MCP servers
+            const mcpCount = state._mcpClients?.length || 0;
+            checks.push(`MCP servers: ${mcpCount}`);
+
             return `System check:\n${checks.map(c => `  ${c}`).join('\n')}`;
         },
     },
@@ -115,9 +143,16 @@ export const COMMANDS = {
     },
 
     '/tokens': {
-        description: 'Show token usage',
+        description: 'Show token usage and context size',
         handler(args, state) {
-            return `Input: ${state.tokenUsage.input}, Output: ${state.tokenUsage.output}, Messages: ${state.messages.length}`;
+            const contextTokens = state._contextManager
+                ? state._contextManager.getTokenCount(state.messages)
+                : '?';
+            return [
+                `Input: ${state.tokenUsage.input}, Output: ${state.tokenUsage.output}`,
+                `Messages: ${state.messages.length}`,
+                `Context: ~${contextTokens} tokens`,
+            ].join('\n');
         },
     },
 
@@ -228,7 +263,10 @@ export const COMMANDS = {
         description: 'Show conversation memory usage',
         handler(args, state) {
             const msgSize = JSON.stringify(state.messages).length;
-            return `Memory: ${state.messages.length} messages, ~${(msgSize / 1024).toFixed(1)}KB`;
+            const tokenEst = state._contextManager
+                ? state._contextManager.getTokenCount(state.messages)
+                : Math.ceil(msgSize / 4);
+            return `Memory: ${state.messages.length} messages, ~${(msgSize / 1024).toFixed(1)}KB, ~${tokenEst} tokens`;
         },
     },
 
@@ -372,7 +410,7 @@ export const COMMANDS = {
     },
 
     '/undo': {
-        description: 'Undo last file edit',
+        description: 'Undo last file edit (restore checkpoint)',
         handler() {
             const result = checkpoints.undo();
             if (!result) return 'No checkpoints to undo.';
