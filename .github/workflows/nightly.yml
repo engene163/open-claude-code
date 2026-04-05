@@ -328,6 +328,11 @@ jobs:
           PKG_VERSION="$(node -e "console.log(require('./v2/package.json').version)")"
           TAG="v${PKG_VERSION}-nightly.${DATE}"
 
+          # Handle tag collision (multiple runs same day)
+          if gh release view "${TAG}" --repo "${{ github.repository }}" &>/dev/null; then
+            TAG="${TAG}.${{ github.run_number }}"
+          fi
+
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "date=${DATE}" >> "$GITHUB_OUTPUT"
           echo "pkg_version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
