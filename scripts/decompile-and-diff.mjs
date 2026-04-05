@@ -23,6 +23,19 @@ const require = createRequire(import.meta.url);
 
 // Load rudevolution decompiler
 const decompilerPath = path.join(__dirname, '..', 'rudevolution', 'npm', 'src', 'decompiler');
+
+// Patch: fix scoped package URL encoding in npm-fetch before loading decompiler
+const npmFetchPath = path.join(decompilerPath, 'npm-fetch.js');
+const npmFetchSrc = require('fs').readFileSync(npmFetchPath, 'utf8');
+if (npmFetchSrc.includes("replace('%40', '@')") && !npmFetchSrc.includes("replace('%2F', '/')")) {
+  const patched = npmFetchSrc.replace(
+    /encodeURIComponent\(packageName\)\.replace\('%40', '@'\)/g,
+    "encodeURIComponent(packageName).replace('%40', '@').replace('%2F', '/')"
+  );
+  require('fs').writeFileSync(npmFetchPath, patched);
+  console.error('Patched npm-fetch.js: fixed scoped package URL encoding');
+}
+
 const { decompilePackage } = require(decompilerPath);
 
 const PACKAGE = '@anthropic-ai/claude-code';

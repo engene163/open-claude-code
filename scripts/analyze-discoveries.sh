@@ -260,7 +260,7 @@ RESPONSE="$(curl -sf --max-time 90 \
   -H "anthropic-version: 2023-06-01" \
   -d "$(cat <<PAYLOAD
 {
-  "model": "claude-sonnet-4-6-20250514",
+  "model": "claude-sonnet-4-20250514",
   "max_tokens": 2048,
   "messages": [
     {
@@ -306,7 +306,7 @@ fi
 cat <<EOF
 ### Deep Discovery Analysis
 
-**Model:** Claude Sonnet 4.6 (\`claude-sonnet-4-6-20250514\`)
+**Model:** Claude Sonnet 4.6 (\`claude-sonnet-4-20250514\`)
 **Compared:** v\`${PREVIOUS_VERSION}\` → v\`${NEW_VERSION}\`
 **Intelligence Sources:** npm registry, rudevolution decompilation (${OCC_FILES:-0} patterns), 21 research documents
 
