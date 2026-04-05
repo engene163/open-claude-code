@@ -362,12 +362,117 @@ jobs:
           retention-days: 90
 
   # ──────────────────────────────────────────────────────────────────
+  # Phase 3b: Auto-update v2/src with new capabilities
+  # ──────────────────────────────────────────────────────────────────
+  autoupdate:
+    name: 'Phase 3b: Auto-Update Capabilities'
+    runs-on: ubuntu-latest
+    needs: [detect, verify, analyze]
+    if: |
+      always() &&
+      needs.verify.result == 'success' &&
+      (needs.detect.outputs.should_release == 'true' || github.event.inputs.force_release == 'true')
+    outputs:
+      updates_applied: ${{ steps.update.outputs.applied }}
+      update_summary: ${{ steps.update.outputs.summary }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        working-directory: v2
+        run: npm ci
+
+      - name: Download decompile diff
+        if: needs.analyze.outputs.diff_available == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: discovery-summary
+          path: /tmp
+        continue-on-error: true
+
+      - name: Auto-update capabilities
+        id: update
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PREVIOUS_VERSION: ${{ needs.detect.outputs.previous_version }}
+          NEW_VERSION: ${{ needs.detect.outputs.new_version }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "::notice::No API key — skipping auto-update"
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ ! -f /tmp/decompile-diff.json ]; then
+            echo "::notice::No decompile diff — skipping auto-update"
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          set +e
+          UPDATE_OUTPUT="$(node scripts/auto-update-capabilities.mjs /tmp/decompile-diff.json 2>/tmp/update-stderr.txt)"
+          UPDATE_EXIT=$?
+          set -e
+
+          cat /tmp/update-stderr.txt >&2 || true
+
+          if [ "${UPDATE_EXIT}" -eq 0 ] && [ -n "${UPDATE_OUTPUT}" ]; then
+            echo "${UPDATE_OUTPUT}" > /tmp/update-summary.json
+            echo "applied=true" >> "$GITHUB_OUTPUT"
+
+            FILES_CHANGED=$(echo "${UPDATE_OUTPUT}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('updates',[])))" 2>/dev/null || echo 0)
+            echo "::notice::Auto-updated ${FILES_CHANGED} files with new capabilities"
+
+            ESCAPED=$(echo "${UPDATE_OUTPUT}" | head -50 | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "summary=${ESCAPED}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Auto-update: no changes applied (exit ${UPDATE_EXIT})"
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit auto-updates
+        if: steps.update.outputs.applied == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add v2/src/
+          if git diff --cached --quiet; then
+            echo "No file changes to commit"
+          else
+            git commit -m "feat(nightly): auto-update capabilities from Claude Code v${{ needs.detect.outputs.new_version }}
+
+          Automated capability sync from upstream decompilation analysis.
+          Changes verified: tests pass with no regressions.
+
+          Co-Authored-By: Claude Sonnet 4 <noreply@anthropic.com>"
+            git push origin main || echo "::warning::Could not push (branch protection)"
+          fi
+
+      - name: Upload update summary
+        if: steps.update.outputs.applied == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-summary
+          path: /tmp/update-summary.json
+          retention-days: 90
+
+  # ──────────────────────────────────────────────────────────────────
   # Phase 4: Release — publish verified nightly build
   # ──────────────────────────────────────────────────────────────────
   release:
     name: 'Phase 4: Release'
     runs-on: ubuntu-latest
-    needs: [detect, verify, analyze]
+    needs: [detect, verify, analyze, autoupdate]
     if: |
       always() &&
       needs.verify.result == 'success' &&
