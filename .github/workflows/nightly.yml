@@ -571,3 +571,4 @@ if exports:
           )"
             echo "::notice::Created failure investigation issue"
           fi
+
