@@ -118,11 +118,15 @@ jobs:
           echo "${TEST_OUTPUT}"
 
           # Parse pass/fail counts from test output
-          PASS_COUNT="$(echo "${TEST_OUTPUT}" | grep -oE '[0-9]+ passing' | grep -oE '[0-9]+' | tail -1 || echo '0')"
-          FAIL_COUNT="$(echo "${TEST_OUTPUT}" | grep -oE '[0-9]+ failing' | grep -oE '[0-9]+' | tail -1 || echo '0')"
+          # Format: "Tests: 904 total, 903 passed, 1 failed"
+          PASS_COUNT="$(echo "${TEST_OUTPUT}" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | tail -1 || echo '0')"
+          FAIL_COUNT="$(echo "${TEST_OUTPUT}" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' | tail -1 || echo '0')"
 
           if [ -z "${PASS_COUNT}" ] || [ "${PASS_COUNT}" = "0" ]; then
-            # Fallback: count lines with checkmarks or "pass"
+            # Fallback: try "passing" format or count checkmarks
+            PASS_COUNT="$(echo "${TEST_OUTPUT}" | grep -oE '[0-9]+ passing' | grep -oE '[0-9]+' | tail -1 || echo '0')"
+          fi
+          if [ -z "${PASS_COUNT}" ] || [ "${PASS_COUNT}" = "0" ]; then
             PASS_COUNT="$(echo "${TEST_OUTPUT}" | grep -cE '(✓|✔|PASS|pass)' || echo '0')"
           fi
 
