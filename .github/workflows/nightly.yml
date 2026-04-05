@@ -233,10 +233,10 @@ jobs:
           exit 1
 
   # ──────────────────────────────────────────────────────────────────
-  # Phase 3: Analyze — AI-powered discovery (optional)
+  # Phase 3: Decompile + Analyze — full rudevolution pipeline
   # ──────────────────────────────────────────────────────────────────
   analyze:
-    name: 'Phase 3: Analyze'
+    name: 'Phase 3: Decompile & Analyze'
     runs-on: ubuntu-latest
     needs: [detect, verify]
     if: |
@@ -244,16 +244,114 @@ jobs:
       needs.verify.result == 'success' &&
       github.event.inputs.skip_ai_analysis != 'true'
     outputs:
-      discovery_summary: ${{ steps.analyze.outputs.summary }}
-      analysis_available: ${{ steps.analyze.outputs.available }}
+      discovery_summary: ${{ steps.combine.outputs.summary }}
+      analysis_available: ${{ steps.combine.outputs.available }}
+      diff_available: ${{ steps.decompile.outputs.available }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Run discovery analysis
-        id: analyze
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # ── Step 1: Full decompilation of both versions ──
+      - name: Run rudevolution decompiler
+        id: decompile
+        run: |
+          NEW="${{ needs.detect.outputs.new_version }}"
+          PREV="${{ needs.detect.outputs.previous_version }}"
+
+          echo "::group::Decompiling @anthropic-ai/claude-code v${PREV} and v${NEW}"
+
+          set +e
+          DIFF_JSON="$(node scripts/decompile-and-diff.mjs "${NEW}" "${PREV}" 2>/tmp/decompile-stderr.txt)"
+          DECOMPILE_EXIT=$?
+          set -e
+
+          cat /tmp/decompile-stderr.txt >&2 || true
+
+          if [ "${DECOMPILE_EXIT}" -eq 0 ] && [ -n "${DIFF_JSON}" ]; then
+            echo "${DIFF_JSON}" > /tmp/decompile-diff.json
+            echo "available=true" >> "$GITHUB_OUTPUT"
+
+            # Extract summary stats for release notes
+            ADDED=$(echo "${DIFF_JSON}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('summary',{}).get('addedModuleCount',0))" 2>/dev/null || echo 0)
+            REMOVED=$(echo "${DIFF_JSON}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('summary',{}).get('removedModuleCount',0))" 2>/dev/null || echo 0)
+            CHANGED=$(echo "${DIFF_JSON}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('summary',{}).get('changedModuleCount',0))" 2>/dev/null || echo 0)
+            NEW_FUNCS=$(echo "${DIFF_JSON}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('summary',{}).get('newFunctions',0))" 2>/dev/null || echo 0)
+            PREV_FUNCS=$(echo "${DIFF_JSON}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('summary',{}).get('prevFunctions',0))" 2>/dev/null || echo 0)
+            NEW_EXPORTS=$(echo "${DIFF_JSON}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('summary',{}).get('addedExportCount',0))" 2>/dev/null || echo 0)
+
+            echo "::notice::Decompilation diff: +${ADDED} modules, -${REMOVED} modules, ~${CHANGED} changed, ${NEW_FUNCS} functions (was ${PREV_FUNCS}), +${NEW_EXPORTS} new exports"
+
+            # Generate markdown section from diff
+            python3 -c "
+import json, sys
+
+d = json.load(open('/tmp/decompile-diff.json'))
+s = d.get('summary', {})
+
+print('### Structural Diff (rudevolution decompilation)')
+print()
+print('| Metric | v${PREV} | v${NEW} | Delta |')
+print('|--------|---------|---------|-------|')
+print(f'| Modules | {s.get(\"prevModules\",\"?\")} | {s.get(\"newModules\",\"?\")} | {\"+\" if s.get(\"newModules\",0)>=s.get(\"prevModules\",0) else \"\"}{s.get(\"newModules\",0)-s.get(\"prevModules\",0)} |')
+print(f'| Functions | {s.get(\"prevFunctions\",\"?\")} | {s.get(\"newFunctions\",\"?\")} | {\"+\" if s.get(\"newFunctions\",0)>=s.get(\"prevFunctions\",0) else \"\"}{s.get(\"newFunctions\",0)-s.get(\"prevFunctions\",0)} |')
+print(f'| Classes | {s.get(\"prevClasses\",\"?\")} | {s.get(\"newClasses\",\"?\")} | {\"+\" if s.get(\"newClasses\",0)>=s.get(\"prevClasses\",0) else \"\"}{s.get(\"newClasses\",0)-s.get(\"prevClasses\",0)} |')
+print(f'| New exports | — | — | +{s.get(\"addedExportCount\",0)} |')
+print(f'| Removed exports | — | — | -{s.get(\"removedExportCount\",0)} |')
+print()
+
+added = d.get('addedModules', [])
+if added:
+    print('#### New Modules')
+    for m in added[:15]:
+        print(f'- **{m[\"name\"]}** ({m.get(\"functions\",0)} functions, {m.get(\"classes\",0)} classes)')
+    if len(added) > 15:
+        print(f'- ...and {len(added)-15} more')
+    print()
+
+removed = d.get('removedModules', [])
+if removed:
+    print('#### Removed Modules')
+    for m in removed[:10]:
+        print(f'- ~~{m[\"name\"]}~~ ({m.get(\"functions\",0)} functions)')
+    print()
+
+changed = d.get('changedModules', [])
+if changed:
+    print('#### Significantly Changed Modules')
+    for m in sorted(changed, key=lambda x: abs(x.get('sizeDelta',0)), reverse=True)[:15]:
+        delta = m.get('sizeDelta', 0)
+        sign = '+' if delta >= 0 else ''
+        print(f'- **{m[\"name\"]}**: {sign}{delta} bytes, {sign}{m.get(\"funcDelta\",0)} functions')
+    print()
+
+exports = d.get('addedExports', [])
+if exports:
+    print('#### New Exports')
+    for e in exports[:20]:
+        print(f'- \`{e}\`')
+    if len(exports) > 20:
+        print(f'- ...and {len(exports)-20} more')
+    print()
+" > /tmp/decompile-summary.md 2>/dev/null || echo "Decompile summary generation failed" > /tmp/decompile-summary.md
+
+          else
+            echo "::warning::Decompilation failed or returned empty"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "> Decompilation was not available for this release." > /tmp/decompile-summary.md
+          fi
+
+          echo "::endgroup::"
+
+      # ── Step 2: AI-powered analysis (uses decompile data) ──
+      - name: Run AI discovery analysis
+        id: ai_analysis
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
@@ -262,36 +360,55 @@ jobs:
           if [ -z "${ANTHROPIC_API_KEY}" ]; then
             echo "::notice::ANTHROPIC_API_KEY not set — skipping AI analysis"
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "summary=AI analysis skipped (no API key configured)" >> "$GITHUB_OUTPUT"
+            echo "> AI analysis skipped (no API key)." > /tmp/ai-summary.md
             exit 0
           fi
 
           set +e
-          SUMMARY="$(bash scripts/analyze-discoveries.sh \
+          AI_SUMMARY="$(bash scripts/analyze-discoveries.sh \
             "${{ needs.detect.outputs.new_version }}" \
-            "${{ needs.detect.outputs.previous_version }}" 2>&1)"
-          EXIT_CODE=$?
+            "${{ needs.detect.outputs.previous_version }}" 2>/tmp/ai-stderr.txt)"
+          AI_EXIT=$?
           set -e
 
-          if [ "${EXIT_CODE}" -eq 0 ] && [ -n "${SUMMARY}" ]; then
-            # Write to file to preserve multiline content
-            echo "${SUMMARY}" > /tmp/discovery-summary.md
+          cat /tmp/ai-stderr.txt >&2 || true
+
+          if [ "${AI_EXIT}" -eq 0 ] && [ -n "${AI_SUMMARY}" ]; then
+            echo "${AI_SUMMARY}" > /tmp/ai-summary.md
             echo "available=true" >> "$GITHUB_OUTPUT"
-            # Escape for output (newlines)
-            ESCAPED="$(echo "${SUMMARY}" | head -100 | sed ':a;N;$!ba;s/\n/%0A/g')"
-            echo "summary=${ESCAPED}" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::AI analysis failed or returned empty"
+            echo "::warning::AI analysis failed"
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "summary=AI analysis was unavailable for this release" >> "$GITHUB_OUTPUT"
+            echo "> AI analysis was unavailable for this release." > /tmp/ai-summary.md
           fi
 
-      - name: Upload discovery summary
-        if: steps.analyze.outputs.available == 'true'
+      # ── Step 3: Combine into single discovery report ──
+      - name: Combine analysis
+        id: combine
+        run: |
+          {
+            echo "## Discovery Report"
+            echo ""
+            cat /tmp/decompile-summary.md 2>/dev/null || true
+            echo ""
+            echo "---"
+            echo ""
+            cat /tmp/ai-summary.md 2>/dev/null || true
+          } > /tmp/discovery-summary.md
+
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+          # Escape for GitHub output
+          ESCAPED="$(cat /tmp/discovery-summary.md | head -200 | sed ':a;N;$!ba;s/\n/%0A/g')"
+          echo "summary=${ESCAPED}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: discovery-summary
-          path: /tmp/discovery-summary.md
+          path: |
+            /tmp/discovery-summary.md
+            /tmp/decompile-diff.json
           retention-days: 90
 
   # ──────────────────────────────────────────────────────────────────
