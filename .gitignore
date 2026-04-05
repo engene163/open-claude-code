@@ -1,11 +1,33 @@
-# Byte-compiled / optimized / DLL files
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tgz
+
+# Environment
+.env
+.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Flow / agent state
+.claude-flow/
+
+# Python (legacy)
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-node_modules
 # Distribution / packaging
 .Python
 build/
